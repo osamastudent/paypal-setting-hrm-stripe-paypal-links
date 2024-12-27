@@ -1,0 +1,173 @@
+paypal
+https://medium.com/geekculture/paypal-payment-gateway-integration-with-laravel-ebebc7ccf470
+
+stripe
+https://medium.com/fabcoding/laravel-7-create-a-subscription-system-using-cashier-stripe-77cdf5c8ea5d
+
+
+<!-- in blade file -->
+ <form action="{{route('processTransaction')}}" class="py-0 m-0 w-100" method="post">
+                        @csrf
+                   <input type="hidden" name="amount" id="amount" value="" placeholder="Amount"> 
+                   <input type="hidden" name="paid_invoice" id="paid_invoice" value="" placeholder="Invoice No"> 
+                   <input type="hidden" name="paid_project_id" id="paid_project_id" value="" placeholder="Project id"> 
+                   <input type="hidden" name="paid_client_id" id="paid_client_id" value="" placeholder="Client id"> 
+                    
+                   <button  type="submit" class="form-control py-0">
+                        <img src="https://www.paypalobjects.com/webstatic/mktg/logo/pp_cc_mark_111x69.jpg" alt="PayPal Logo" class="border-0" style="height: 20px; margin-right: 5px;">
+                       <!--<i class="fab fa-paypal mr-1"></i>-->
+                       PayPal</button>
+                   
+                        </form>
+
+<!-- in cntroller -->
+<?php
+namespace App\Http\Controllers;
+use App\Models\ClientInvoice;
+use App\Models\Payment;
+use Illuminate\Http\Request;
+use Srmklive\PayPal\Services\PayPal as PayPalClient;
+use Carbon\Carbon;
+
+class PayPalController extends Controller
+{
+    /**
+     * create transaction.
+     *
+     * @return \Illuminate\Http\Response
+     */
+    public function createTransaction()
+    {
+        $client_id = auth()->user()->employee_id;
+     
+        $clientInvoices = ClientInvoice::where('client_id', $client_id)->get();
+
+        return view('client_account.invoices.list', compact('clientInvoices'));
+    }
+    /**
+     * process transaction.
+     *
+     * @return \Illuminate\Http\Response
+     */
+    public function processTransaction(Request $request)
+    {
+        $invoice=$request->paid_invoice;
+        $projectid=$request->paid_project_id;
+        $clientid=$request->paid_client_id;
+        
+        
+        $request->validate([
+            'amount'=>'required',
+            ],['required'=>'Please first select your invoice ']);
+            
+        // dd($request->amount);
+        $provider = new PayPalClient;
+        $provider->setApiCredentials(config('paypal'));
+        $paypalToken = $provider->getAccessToken();
+        $response = $provider->createOrder([
+            "intent" => "CAPTURE",
+            "application_context" => [
+               "return_url" => route('successTransaction', [
+        'invoice_no' => $invoice,
+        'project_id' => $projectid,
+        'client_id' => $clientid,
+    ]),
+                "cancel_url" => route('cancelTransaction'),
+                "shipping_preference" => "NO_SHIPPING",
+                "brand_name" => "The HRM", // Customize the brand name shown on the PayPal page
+        "landing_page" => "LOGIN", // You can set this to "BILLING" to show the billing info first
+        "user_action" => "PAY_NOW",
+            ],
+         "purchase_units" => [
+            0 => [ 
+                "amount" => [
+                    "currency_code" => "USD",
+                    "value" => $request->amount
+                ],
+                
+            ]
+        ]
+    ]);
+    
+    
+        if (isset($response['id']) && $response['id'] != null) {
+            // redirect to approve href
+            foreach ($response['links'] as $links) {
+                if ($links['rel'] == 'approve') {
+                    return redirect()->away($links['href']);
+                }
+            }
+            
+            return redirect()
+                ->route('client.invoices')
+                ->with('error', 'Something went wrong.');
+        } else {
+            return redirect()
+                ->route('client.invoices')
+                ->with('error', $response['message'] ?? 'Something went wrong.');
+        }
+    }
+    /**
+     * success transaction.
+     *
+     * @return \Illuminate\Http\Response
+     */
+    public function successTransaction(Request $request)
+    {
+        $invoice_no = $request->query('invoice_no');
+        $project_id = $request->query('project_id');
+        $client_id = $request->query('client_id');
+        
+        $provider = new PayPalClient;
+        $provider->setApiCredentials(config('paypal'));
+        $provider->getAccessToken();
+        $response = $provider->capturePaymentOrder($request['token']);
+        if (isset($response['status']) && $response['status'] == 'COMPLETED') {
+            
+        
+            Payment::create([
+                'date' => Carbon::now(),
+            'invoice_no' => $invoice_no,
+            'client_id' => $client_id,
+            'project_id' => $project_id,
+                 'payment_id'=>$response['id'],
+        'amount'=>$response['purchase_units'][0]['payments']['captures'][0]['amount']['value'],
+        'currency_code'=>$response['purchase_units'][0]['payments']['captures'][0]['amount']['currency_code'],
+        'payer_name'=>$response['payer']['name']['given_name'] . ' ' . $response['payer']['name']['surname'],
+        'payer_email'=>$response['payer']['email_address'],
+        'payer_id'=>$response['payer']['payer_id'],
+        'payment_status'=>'paid',
+        'payment_method'=>'PayPal',
+                        ]);
+                        
+            $clientInvoiceStatus = ClientInvoice::where('client_id', auth()->user()->employee_id)
+            ->where('invoice_no', $invoice_no)  
+            ->first();
+
+            if ($clientInvoiceStatus) {
+                $clientInvoiceStatus->status = 'Paid';
+                $clientInvoiceStatus->save();
+            } 
+            
+            
+            return redirect()
+                ->route('client.invoices')
+                ->with('success', 'Transaction complete.');
+        } else {
+            return redirect()
+                ->route('client.invoices')
+                ->with('error', $response['message'] ?? 'Something went wrong.');
+        }
+    }
+    /**
+     * cancel transaction.
+     *
+     * @return \Illuminate\Http\Response
+     */
+    public function cancelTransaction(Request $request)
+    {
+        return redirect()
+            ->route('client.invoices')
+            ->with('error', $response['message'] ?? 'You have canceled the transaction.');
+    }
+}
